@@ -10,4 +10,4 @@ const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
 console.log(`🔍 URL ${NINJA_URL} `);
 console.log(`🔍 CAUTH_SECRET_NINJA ${AUTH_SECRET_NINJA}`);
-//vv
+
