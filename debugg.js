@@ -62,5 +62,5 @@ async function getDeviceCustomFields(deviceId) {
 
 // ----------------- EXEC -----------------
 const DEVICE_ID = 1492; // 🔁 remplace par le bon ID
-//cahngement
+// PAS DE CHANGEMENT //
 getDeviceCustomFields(DEVICE_ID);
