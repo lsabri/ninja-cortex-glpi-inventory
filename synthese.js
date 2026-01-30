@@ -1,6 +1,8 @@
 const { google } = require('googleapis');
 const dotenv = require('dotenv');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 dotenv.config();
 
@@ -8,7 +10,13 @@ dotenv.config();
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
 const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
-const CREDENTIALS_PATH = process.env.CREDENTIALS_PATH;
+const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
+
+// Si le chemin commence par ~, on le remplace par le home
+if (CREDENTIALS_PATH_ENV.startsWith('~')) {
+  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1));
+}
+
 
 // ----------------- AUTH GOOGLE SHEETS -----------------
 async function getSheetsClient() {
