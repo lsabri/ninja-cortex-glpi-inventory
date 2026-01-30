@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+.AppleDouble
+.AppleDB
+.AppleDesktop
+.Trashes
+*.swp
+
+# Logs
+*.log
+
+# Node / Python (si besoin)
+node_modules/
+venv/
+.env
+
+#keys
+files/

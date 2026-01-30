@@ -1,0 +1,8 @@
+
+    "os": {
+    "manufacturer": "Microsoft Corporation",
+    "name": "Windows 11 Professional Edition",
+    "architecture": "64-bit",
+    "lastBootTime": 1769675502,
+    "buildNumber": "26100",
+    "releaseId": "24H2",
