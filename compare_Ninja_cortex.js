@@ -250,7 +250,7 @@ async function getCortexDevices() {
     }
   }
 
-  await writeToSheet(allRows, SHEET_NAME_CORTEX);
+  //await writeToSheet(allRows, SHEET_NAME_CORTEX);
   console.log(`Fin Cortex XDR ${new Date().toLocaleString('fr-FR')}`);
 }
 
