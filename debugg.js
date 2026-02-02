@@ -21,3 +21,30 @@ if (CREDENTIALS_PATH.startsWith('~')) {
 }
 
 console.log(`🔍 CREDENTIALS_PATH après correction: ${CREDENTIALS_PATH}`);
+
+
+async function test() {
+  try {
+    const tokenResp = await axios.post(`${process.env.NINJA_URL}/ws/oauth/token`, null, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      params: {
+        grant_type: 'client_credentials',
+        client_id: process.env.CLIENT_ID_NINJA,
+        client_secret: process.env.AUTH_SECRET_NINJA,
+        scope: 'monitoring'
+      }
+    });
+
+    const token = tokenResp.data.access_token;
+
+    const resp = await axios.get(`${process.env.NINJA_URL}/api/v2/activities`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    console.log(JSON.stringify(resp.data, null, 2));
+  } catch (e) {
+    console.error(e.response?.data || e.message);
+  }
+}
+
+test();

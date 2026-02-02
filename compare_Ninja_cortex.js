@@ -1,6 +1,10 @@
 const axios = require('axios');
 const dotenv = require('dotenv');
 const { google } = require('googleapis');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
 
 dotenv.config();
 
@@ -16,7 +20,14 @@ const URL_CORTEX = process.env.URL_CORTEX;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
 const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
-const CREDENTIALS_PATH = process.env.CREDENTIALS_PATH;
+const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
+
+// Si le chemin commence par ~, on le remplace par le home
+if (CREDENTIALS_PATH_ENV.startsWith('~')) {
+  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1));
+}
+
+
 
 const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "100", 10);
 

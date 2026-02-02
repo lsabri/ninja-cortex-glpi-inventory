@@ -1,114 +1,82 @@
-const { google } = require('googleapis');
+const axios = require('axios');
 const dotenv = require('dotenv');
-const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 dotenv.config();
 
 // ----------------- CONFIG -----------------
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
-const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
-const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
+const NINJA_URL = process.env.NINJA_URL;
+const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
+const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
-// Si le chemin commence par ~, on le remplace par le home
-if (CREDENTIALS_PATH_ENV.startsWith('~')) {
-  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1));
+let CREDENTIALS_PATH = process.env.CREDENTIALS_PATH;
+if (CREDENTIALS_PATH.startsWith('~')) {
+  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH.slice(1));
 }
 
+console.log('🔍CREDENTIALS_PATH', CREDENTIALS_PATH);
 
-// ----------------- AUTH GOOGLE SHEETS -----------------
-async function getSheetsClient() {
-  const auth = new google.auth.GoogleAuth({
-    keyFile: CREDENTIALS_PATH,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
-  return google.sheets({ version: 'v4', auth });
-}
+// ----------------- NINJA ENDPOINT -----------------
+const endpoint = '/api/v2/activities';
 
-// ----------------- READ DATA -----------------
-async function readSheet(sheetName, sheets) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${sheetName}!A3:F`, // Range complet, nom en B, date en F
-  });
-
-  const values = res.data.values || [];
-  // Retourner un tableau d'objets { name, last }
-  return values.map(row => ({
-    name: row[1],             // colonne B
-    last: row[5] || '',     // colonne F
-  })).filter(item => item.name); // ignorer lignes sans nom
-}
-
-// ----------------- COMPARE -----------------
-async function writeCompareSheet(ninjaData, cortexData, sheets) {
-  const ninjaMap = new Map(ninjaData.map(item => [item.name, item.last]));
-  const cortexMap = new Map(cortexData.map(item => [item.name, item.last]));
-
-  const allNames = new Set([...ninjaMap.keys(), ...cortexMap.keys()]);
-  const compareRows = [];
-
-  allNames.forEach(name => {
-    const inNinja = ninjaMap.has(name) ? 'Oui' : 'Non';
-    const lastContact = ninjaMap.get(name) || '';
-    const inCortex = cortexMap.has(name) ? 'Oui' : 'Non';
-    const lastSeen = cortexMap.get(name) || '';
-
-    compareRows.push([name, inNinja, lastContact, inCortex, lastSeen]);
-  });
-
-  compareRows.sort((a, b) => a[0].localeCompare(b[0]));
-
-  // Créer ou vider la feuille COMPARE
+// === OBTENTION DU TOKEN ===
+async function getAccessToken() {
   try {
-    await sheets.spreadsheets.values.clear({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'COMPARE',
-    });
-  } catch (err) {
-    // si la feuille n'existe pas, on la crée
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SPREADSHEET_ID,
-      resource: {
-        requests: [{
-          addSheet: { properties: { title: 'COMPARE' } }
-        }]
+    const response = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      params: {
+        grant_type: 'client_credentials',
+        client_id: CLIENT_ID_NINJA,
+        client_secret: AUTH_SECRET_NINJA,
+        scope: 'monitoring'
       }
     });
+    return response.data.access_token;
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'obtention du jeton d\'accès :', error.message);
+    return null;
   }
+}
 
-  // Écrire les en-têtes
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `COMPARE!A1:E1`,
-    valueInputOption: 'RAW',
-    resource: { values: [['Nom', 'Machine dans Ninja', 'Last Contact', 'Machine dans Cortex', 'Last Seen']] }
-  });
+// === GET ACTIVITIES ET DEBUG ===
+async function getAllActivities() {
+  try {
+    const accessToken = await getAccessToken();
+    if (!accessToken) throw new Error("Échec de l'authentification");
 
-  if (compareRows.length > 0) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `COMPARE!A2`,
-      valueInputOption: 'RAW',
-      resource: { values: compareRows }
+    const response = await axios.get(`${NINJA_URL}${endpoint}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      }
     });
+
+    const rawData = response.data;
+
+    // Trouver le tableau d'activités
+    let activities = Array.isArray(rawData) ? rawData : Object.values(rawData).find(Array.isArray);
+    if (!activities) throw new Error("Aucun tableau d'activités trouvé dans la réponse.");
+
+    // Afficher toutes les activités pour inspection
+    console.log('📦 Toutes les activités :', JSON.stringify(activities, null, 2));
+
+    // Lister tous les utilisateurs et rôles présents
+    const users = activities.map(a => ({
+      userName: a.userName || a.user || 'N/A',
+      userRole: a.userRole || a.role || 'N/A'
+    }));
+    console.log('🧾 Tous les utilisateurs/roles :', users);
+
+    // Retourner les activités pour filtrage ultérieur
+    return activities;
+
+  } catch (error) {
+    console.error('❌ Erreur lors de la récupération des activités :',
+      error.response?.data || error.message);
+    return null;
   }
 }
 
-// ----------------- MAIN -----------------
-async function main() {
-  const sheets = await getSheetsClient();
-
-  const [ninjaData, cortexData] = await Promise.all([
-    readSheet(SHEET_NAME_NINJA, sheets),
-    readSheet(SHEET_NAME_CORTEX, sheets)
-  ]);
-
-  await writeCompareSheet(ninjaData, cortexData, sheets);
-
-  console.log('✅ Feuille COMPARE générée avec succès');
-}
-
-main().catch(err => console.error(err));
+// === EXÉCUTION ===
+getAllActivities();
