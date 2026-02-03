@@ -12,6 +12,7 @@
 # Node / Python (si besoin)
 node_modules/
 venv/
+logs/
 .env
 
 #keys
