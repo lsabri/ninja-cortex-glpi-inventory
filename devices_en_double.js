@@ -2,10 +2,10 @@
 
 const axios = require('axios');
 const nodemailer = require('nodemailer');
-require('dotenv').config();
+const dotenv = require('dotenv');
 const fs = require('fs');
-const path = require('path');
 
+const path = require('path');
 process.chdir(__dirname);
 dotenv.config();
 
