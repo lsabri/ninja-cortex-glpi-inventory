@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 process.chdir(__dirname);
+dotenv.config();
 
 // ================= CONFIG =================
 const logDir = path.join(__dirname, 'logs');
