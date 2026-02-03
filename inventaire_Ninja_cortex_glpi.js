@@ -4,8 +4,10 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+process.chdir(__dirname);
 
 dotenv.config();
+
 
 // ----------------- CONFIG -----------------
 const NINJA_URL = process.env.NINJA_URL;
