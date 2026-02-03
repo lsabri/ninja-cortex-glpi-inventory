@@ -6,6 +6,8 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 
+process.chdir(__dirname);
+
 // ================= CONFIG =================
 const logDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logDir)) {

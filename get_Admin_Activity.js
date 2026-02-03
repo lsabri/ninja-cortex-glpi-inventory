@@ -6,6 +6,8 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 
+process.chdir(__dirname);
+
 dotenv.config();
 
 // ================= CONFIG =================
