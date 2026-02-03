@@ -5,7 +5,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-
 dotenv.config();
 
 // ----------------- CONFIG -----------------
@@ -22,28 +21,31 @@ const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
 const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
 const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
 
-// Si le chemin commence par ~, on le remplace par le home
-if (CREDENTIALS_PATH_ENV.startsWith('~')) {
-  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1));
-}
-
-
+let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~') 
+  ? path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1)) 
+  : CREDENTIALS_PATH_ENV;
 
 const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "100", 10);
 
+// ----------------- LOGGING -----------------
+const LOG_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const LOG_FILE = path.join(LOG_DIR, 'inventaire_Ninja_cortex.log');
+
+function writeLog(message) {
+  const timestamp = new Date().toLocaleString('fr-FR');
+  const line = `[${timestamp}] ${message}\n`;
+  console.log(line.trim());
+  fs.appendFileSync(LOG_FILE, line);
+}
+
 // ----------------- UTIL -----------------
-console.log("NINJA_URL =", process.env.NINJA_URL);
-console.log("SPREADSHEET_ID =", process.env.SPREADSHEET_ID);
-
-
-// 
 function formatTimestamp(ms, isCortex = false) {
   if (!ms) return "N/A";
   return new Date(isCortex ? ms : ms * 1000).toLocaleString('fr-FR');
 }
 
 // ----------------- GOOGLE SHEETS -----------------
-
 async function writeToSheet(rows, sheetName) {
   try {
     const auth = new google.auth.GoogleAuth({
@@ -60,28 +62,25 @@ async function writeToSheet(rows, sheetName) {
       ? ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Contact']
       : ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Seen'];
 
-    
-    const updateLine = [`Dernière mise à jour : ${new Date().toLocaleString('fr-FR')}`, '', '', '', '', '', ''];
-
     const values = [
-      updateLine, 
-      headers,    
+      headers,
       ...rows     
     ];
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${sheetName}!A1`, // On force le début à A1
+      range: `${sheetName}!A1`,
       valueInputOption: 'RAW',
       resource: { values }
     });
 
-    console.log(`✅ Écriture terminée dans ${sheetName} (Colonnes A-G)`);
+    writeLog(`✅ Écriture terminée dans ${sheetName} (${rows.length} lignes)`);
 
   } catch (err) {
-    console.error(`❌ Erreur Google Sheets (${sheetName}) :`, err.message);
+    writeLog(`❌ Erreur Google Sheets (${sheetName}) : ${err.message}`);
   }
 }
+
 // ----------------- NINJA -----------------
 async function getAccessToken() {
   try {
@@ -96,53 +95,29 @@ async function getAccessToken() {
     });
     return resp.data.access_token;
   } catch (err) {
-    console.error('❌ Erreur token NinjaOne :', err.response?.data || err.message);
+    writeLog(`❌ Erreur token NinjaOne : ${err.response?.data || err.message}`);
     return null;
   }
 }
 
-// ----------------- NINJA -----------------
-async function getDeviceOS(deviceId, token) {
-  try {
-    const resp = await axios.get(`${NINJA_URL}/v2/device/${deviceId}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    const device = resp.data;
-    return {
-      osName: device.os?.name || "OS inconnu",
-      osRelease: device.os?.releaseId || "N/A"
-    };
-  } catch (err) {
-    console.error(`❌ Impossible de récupérer OS du device ${deviceId}:`, err.response?.data || err.message);
-    return { osName: "OS inconnu", osRelease: "N/A" };
-  }
-};
-
 async function getNinjaDevices() {
   const token = await getAccessToken();
-  if (!token) return;
+  if (!token) {
+    writeLog('❌ Impossible de récupérer le token NinjaOne, arrêt du script.');
+    return [];
+  }
 
   try {
     const resp = await axios.get(`${NINJA_URL}/v2/devices`, {
       headers: { Authorization: `Bearer ${token}` }
     });
-
     const devices = resp.data;
-    console.log(`🖥️ ${devices.length} devices récupérés`);
+    writeLog(`🖥️ Nombre de machines Ninja récupérées : ${devices.length}`);
 
     const rows = [];
-
     for (const d of devices) {
       const name = d.systemName || d.hostname || d.displayName || "(nom inconnu)";
       const lastContact = formatTimestamp(d.lastContact);
-  
-
-      // OS Name et OS Release depuis le device complet
-      const osInfo = await getDeviceOS(d.id, token);
-      const osName = osInfo.osName;
-      const osRelease = osInfo.osRelease;
-
-      // Récupérer Agent Version depuis les champs personnalisés
       let agentVersion = "Inconnue";
       try {
         const customResp = await axios.get(`${NINJA_URL}/v2/device/${d.id}/custom-fields`, {
@@ -150,31 +125,24 @@ async function getNinjaDevices() {
         });
         agentVersion = customResp.data.versionAgentNinjaone || "Inconnue";
       } catch (errCustom) {
-        console.warn(`⚠️ Impossible de récupérer le champ versionAgentNinjaone pour ${name} :`, errCustom.message);
+        writeLog(`⚠️ Impossible de récupérer versionAgentNinjaone pour ${name}`);
       }
 
-      console.log(`- ${name} | OS Name: ${osName} | OS Release: ${osRelease} | Agent: ${agentVersion}`);
-
-      rows.push([d.id, name, osName, osRelease, agentVersion, lastContact]);
+      rows.push([d.id, name, d.os?.name || "OS inconnu", d.os?.releaseId || "N/A", agentVersion, lastContact]);
     }
 
     await writeToSheet(rows, SHEET_NAME_NINJA);
+    return rows.length;
   } catch (err) {
-    console.error('❌ Erreur NinjaOne :', err.response?.data || err.message);
+    writeLog(`❌ Erreur NinjaOne : ${err.response?.data || err.message}`);
+    return 0;
   }
 }
 
 // ----------------- CORTEX -----------------
-
 function windowsReleaseToHVersion(osVersion) {
   if (!osVersion) return "N/A";
-
-  // Exemples possibles :
-  // "10.0.22621" → 22H2
-  // "10.0.26100" → 24H2
-
   const build = osVersion.split('.').pop();
-
   const map = {
     "22000": "21H2",
     "22621": "22H2",
@@ -187,91 +155,62 @@ function windowsReleaseToHVersion(osVersion) {
     "19044": "21H2",
     "19045": "22H2"
   };
-
   return map[build] || "Version inconnue";
 }
 
 async function getCortexDevices() {
-  console.log(`Début Cortex XDR ${new Date().toLocaleString('fr-FR')}`);
   let offset = 0;
   const allRows = [];
+  let cortexCount = 0;
 
   while (true) {
     try {
       const resp = await axios.post(
         URL_CORTEX,
-        {
-          request_data: {
-            filters: [],
-            search_from: offset,
-            search_to: offset + PAGE_SIZE
-          }
-        },
-        {
-          headers: {
-            "x-xdr-auth-id": AUTH_ID_CORTEX,
-            Authorization: AUTH_TOKEN_CORTEX,
-            "Content-Type": "application/json"
-          }
-        }
+        { request_data: { filters: [], search_from: offset, search_to: offset + PAGE_SIZE } },
+        { headers: { "x-xdr-auth-id": AUTH_ID_CORTEX, Authorization: AUTH_TOKEN_CORTEX, "Content-Type": "application/json" } }
       );
 
       const endpoints = resp.data.reply.endpoints || [];
-      const result_count = resp.data.reply.result_count || 0;
-      const total_count = resp.data.reply.total_count || 0;
-
       endpoints.forEach(e => {
         const osNameRaw = e.operating_system || e.os_name || "";
-
         const osNameUpper = osNameRaw.toUpperCase();
-
-        // ✅ GARDER UNIQUEMENT WINDOWS
         if (!osNameUpper.includes("WINDOWS")) return;
+        if (osNameUpper.includes("WINDOWS SERVER") || osNameUpper.includes("AGENT_OS_LINUX") || osNameUpper.includes("AGENT_OS_MAC")) return;
 
-        // ❌ EXCLURE WINDOWS SERVER / LINUX / MAC
-        if (
-          osNameUpper.includes("WINDOWS SERVER") ||
-          osNameUpper.includes("AGENT_OS_LINUX") ||
-          osNameUpper.includes("AGENT_OS_MAC")
-        ) return;
-
-        const osName = osNameRaw.replace(/Microsoft\s*/i, "").trim(); // optionnel
-        const osRelease = windowsReleaseToHVersion(e.os_version);
-        const lastSeen = formatTimestamp(e.last_seen,true);
-      
-
-        console.log(`${e.endpoint_name} | ${osName} | ${osRelease}`);
-
+        cortexCount++;
         allRows.push([
           e.endpoint_id || "(ID inconnu)",
           e.endpoint_name || "(Nom inconnu)",
-          osName,
-          osRelease,
+          osNameRaw.replace(/Microsoft\s*/i,"").trim(),
+          windowsReleaseToHVersion(e.os_version),
           e.endpoint_version || "(Version agent inconnue)",
-          lastSeen
+          formatTimestamp(e.last_seen,true)
         ]);
       });
 
+      const result_count = resp.data.reply.result_count || 0;
+      const total_count = resp.data.reply.total_count || 0;
       if (result_count < PAGE_SIZE || offset >= total_count) break;
       offset += PAGE_SIZE;
-
     } catch (err) {
-      console.error('❌ Erreur Cortex XDR :', err.message);
+      writeLog(`❌ Erreur Cortex XDR : ${err.message}`);
       break;
     }
   }
 
-  //await writeToSheet(allRows, SHEET_NAME_CORTEX);
-  console.log(`Fin Cortex XDR ${new Date().toLocaleString('fr-FR')}`);
+  await writeToSheet(allRows, SHEET_NAME_CORTEX);
+  writeLog(`💻 Nombre de machines Cortex récupérées : ${cortexCount}`);
+  return cortexCount;
 }
-
 
 // ----------------- MAIN -----------------
 async function main() {
-  console.log(`🚀 Début exécution globale ${new Date().toLocaleString('fr-FR')}`);
-  await getNinjaDevices();
-  await getCortexDevices();
-  console.log(`🏁 Fin exécution globale ${new Date().toLocaleString('fr-FR')}`);
+  writeLog('🚀 Début exécution globale du script');
+  const ninjaCount = await getNinjaDevices();
+  const cortexCount = await getCortexDevices();
+  writeLog(`🏁 Fin exécution globale. Résultats : Ninja=${ninjaCount}, Cortex=${cortexCount}`);
+  writeLog(` ------------------------------------`);
 }
 
 main();

@@ -46,7 +46,7 @@ function sendEmail(vBody, vDateBefore, vDateAfter) {
         from: MAIL_FROM,
         to: MAIL_TO,
         cc: MAIL_CC,
-        subject: `Alertes Ninja : filesystem exploré | cmd lancée | GPO modifiée (${vDateAfter} à ${vDateBefore})`,
+        subject: `Alertes Ninja from srvasi : filesystem exploré | cmd lancée | GPO modifiée (${vDateAfter} à ${vDateBefore})`,
         html: `<!DOCTYPE html><html><body>${vBody}</body></html>`
     };
 
@@ -145,7 +145,9 @@ async function AlertesNinja() {
 
     } catch (err) {
         log('❌ Erreur globale du script : ' + err.message);
+        
     }
+    log('--------------------------');
 }
 
 // ================= EXEC =================

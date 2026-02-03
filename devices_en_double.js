@@ -11,7 +11,7 @@ const logDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });
 }
-const LOG_FILE = path.join(logDir, 'log_devices.log');
+const LOG_FILE = path.join(logDir, 'devices_en_double.log');
 
 const NINJA_URL = process.env.NINJA_URL;
 const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
@@ -38,7 +38,7 @@ function sendEmail(vBody) {
         from: 'alertes.ninjaOne@lemonde.fr',
         to: 'lemarchand@lemonde.fr,nguyen@lemonde.fr',
         cc: 'sabri@lemonde.fr,volante@lemonde.fr',
-        subject: `Alertes Ninja : Devices en doublons`,
+        subject: `Alertes Ninja from srvasi: Devices en doublons`,
         html: vBody
     };
 
@@ -143,6 +143,7 @@ async function main() {
     }
 
     log('Script terminé\n');
+      log(' ------------------ ');
 }
 
 // ================= EXEC =================

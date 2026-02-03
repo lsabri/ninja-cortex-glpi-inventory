@@ -1,152 +1,216 @@
-#!/usr/bin/env node
-
 const axios = require('axios');
 const dotenv = require('dotenv');
-const nodemailer = require('nodemailer');
+const { google } = require('googleapis');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 dotenv.config();
 
-// ================= CONFIG =================
+// ----------------- CONFIG -----------------
 const NINJA_URL = process.env.NINJA_URL;
 const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
 const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
-const MAIL_FROM = process.env.MAIL_FROM;
-const MAIL_TO = process.env.MAIL_TO;
-const MAIL_CC = process.env.MAIL_CC;
+const AUTH_ID_CORTEX = process.env.AUTH_ID;
+const AUTH_TOKEN_CORTEX = process.env.AUTH_TOKEN_CORTEX;
+const URL_CORTEX = process.env.URL_CORTEX;
 
-// Dossier et fichier log
-const logDir = path.join(__dirname, 'logs');
-if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-const LOG_FILE = path.join(logDir, 'alertes_ninja.log');
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
+const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
+const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
 
-// ================= UTIL =================
-function log(message) {
-    const date = new Date().toLocaleString('fr-FR');
-    const line = `[${date}] ${message}\n`;
-    fs.appendFileSync(LOG_FILE, line);
-    console.log(line.trim());
+let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~') 
+  ? path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1)) 
+  : CREDENTIALS_PATH_ENV;
+
+const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "100", 10);
+
+// ----------------- LOGGING -----------------
+const LOG_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const LOG_FILE = path.join(LOG_DIR, 'inventaire_Ninja_cortex.log');
+
+function writeLog(message) {
+  const timestamp = new Date().toLocaleString('fr-FR');
+  const line = `[${timestamp}] ${message}\n`;
+  console.log(line.trim());
+  fs.appendFileSync(LOG_FILE, line);
 }
 
-function convertTimestampToDate(timestamp) {
-    return new Date(timestamp * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+// ----------------- UTIL -----------------
+function formatTimestamp(ms, isCortex = false) {
+  if (!ms) return "N/A";
+  return new Date(isCortex ? ms : ms * 1000).toLocaleString('fr-FR');
 }
 
-function sendEmail(vBody, vDateBefore, vDateAfter) {
-    const transporter = nodemailer.createTransport({
-        host: 'smtpout.glm.lan',
-        port: 25,
-        secure: false,
-        tls: { rejectUnauthorized: false }
+// ----------------- GOOGLE SHEETS -----------------
+async function writeToSheet(rows, sheetName) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: CREDENTIALS_PATH,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+    await sheets.spreadsheets.values.clear({ 
+      spreadsheetId: SPREADSHEET_ID, 
+      range: `${sheetName}!A:F` 
     });
 
-    const mailOptions = {
-        from: MAIL_FROM,
-        to: MAIL_TO,
-        cc: MAIL_CC,
-        subject: `Alertes Ninja : filesystem exploré | cmd lancée | GPO modifiée (${vDateAfter} à ${vDateBefore})`,
-        html: `<!DOCTYPE html><html><body>${vBody}</body></html>`
-    };
+    const headers = sheetName === SHEET_NAME_NINJA
+      ? ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Contact']
+      : ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Seen'];
 
-    transporter.sendMail(mailOptions, (error, info) => {
-        if (error) return log('❌ Erreur envoi mail : ' + error.message);
-        log('✅ Mail envoyé : ' + info.response);
+    const values = [
+      headers,
+      ...rows     
+    ];
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A1`,
+      valueInputOption: 'RAW',
+      resource: { values }
     });
+
+    writeLog(`✅ Écriture terminée dans ${sheetName} (${rows.length} lignes)`);
+
+  } catch (err) {
+    writeLog(`❌ Erreur Google Sheets (${sheetName}) : ${err.message}`);
+  }
 }
 
-// ================= NINJA =================
+// ----------------- NINJA -----------------
 async function getAccessToken() {
-    try {
-        log('🔑 Récupération token Ninja…');
-        const resp = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            params: {
-                grant_type: 'client_credentials',
-                client_id: CLIENT_ID_NINJA,
-                client_secret: AUTH_SECRET_NINJA,
-                scope: 'monitoring'
-            },
-            timeout: 10000
+  try {
+    const resp = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      params: {
+        grant_type: 'client_credentials',
+        client_id: CLIENT_ID_NINJA,
+        client_secret: AUTH_SECRET_NINJA,
+        scope: 'monitoring'
+      }
+    });
+    return resp.data.access_token;
+  } catch (err) {
+    writeLog(`❌ Erreur token NinjaOne : ${err.response?.data || err.message}`);
+    return null;
+  }
+}
+
+async function getNinjaDevices() {
+  const token = await getAccessToken();
+  if (!token) {
+    writeLog('❌ Impossible de récupérer le token NinjaOne, arrêt du script.');
+    return [];
+  }
+
+  try {
+    const resp = await axios.get(`${NINJA_URL}/v2/devices`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const devices = resp.data;
+    writeLog(`🖥️ Nombre de machines Ninja récupérées : ${devices.length}`);
+
+    const rows = [];
+    for (const d of devices) {
+      const name = d.systemName || d.hostname || d.displayName || "(nom inconnu)";
+      const lastContact = formatTimestamp(d.lastContact);
+      let agentVersion = "Inconnue";
+      try {
+        const customResp = await axios.get(`${NINJA_URL}/v2/device/${d.id}/custom-fields`, {
+          headers: { Authorization: `Bearer ${token}` }
         });
-        log('✅ Token Ninja récupéré');
-        return resp.data.access_token;
-    } catch (err) {
-        log('❌ Token KO NinjaOne : ' + (err.response?.data || err.message));
-        return null;
+        agentVersion = customResp.data.versionAgentNinjaone || "Inconnue";
+      } catch (errCustom) {
+        writeLog(`⚠️ Impossible de récupérer versionAgentNinjaone pour ${name}`);
+      }
+
+      rows.push([d.id, name, d.os?.name || "OS inconnu", d.os?.releaseId || "N/A", agentVersion, lastContact]);
     }
+
+    await writeToSheet(rows, SHEET_NAME_NINJA);
+    return rows.length;
+  } catch (err) {
+    writeLog(`❌ Erreur NinjaOne : ${err.response?.data || err.message}`);
+    return 0;
+  }
 }
 
-// ================= FONCTION PRINCIPALE =================
-async function AlertesNinja() {
+// ----------------- CORTEX -----------------
+function windowsReleaseToHVersion(osVersion) {
+  if (!osVersion) return "N/A";
+  const build = osVersion.split('.').pop();
+  const map = {
+    "22000": "21H2",
+    "22621": "22H2",
+    "22631": "23H2",
+    "26100": "24H2",
+    "26200": "25H2",
+    "19041": "2004",
+    "19042": "20H2",
+    "19043": "21H1",
+    "19044": "21H2",
+    "19045": "22H2"
+  };
+  return map[build] || "Version inconnue";
+}
+
+async function getCortexDevices() {
+  let offset = 0;
+  const allRows = [];
+  let cortexCount = 0;
+
+  while (true) {
     try {
-        const token = await getAccessToken();
-        if (!token) return log('❌ Impossible de récupérer le token, arrêt du script.');
+      const resp = await axios.post(
+        URL_CORTEX,
+        { request_data: { filters: [], search_from: offset, search_to: offset + PAGE_SIZE } },
+        { headers: { "x-xdr-auth-id": AUTH_ID_CORTEX, Authorization: AUTH_TOKEN_CORTEX, "Content-Type": "application/json" } }
+      );
 
-        const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-        const intervalInSeconds = 3600 / 4; // 15 min
-        const beforeTimestamp = Math.round(Date.now() / 1000);
-        const afterTimestamp = beforeTimestamp - intervalInSeconds;
-        const vDateBefore = convertTimestampToDate(beforeTimestamp);
-        const vDateAfter = convertTimestampToDate(afterTimestamp);
+      const endpoints = resp.data.reply.endpoints || [];
+      endpoints.forEach(e => {
+        const osNameRaw = e.operating_system || e.os_name || "";
+        const osNameUpper = osNameRaw.toUpperCase();
+        if (!osNameUpper.includes("WINDOWS")) return;
+        if (osNameUpper.includes("WINDOWS SERVER") || osNameUpper.includes("AGENT_OS_LINUX") || osNameUpper.includes("AGENT_OS_MAC")) return;
 
-        const urls = [
-            { url: `/v2/activities?class=DEVICE&before=${beforeTimestamp}&after=${afterTimestamp}&type=REMOTE_TOOLS&pageSize=200`, type: 'FS' },
-            { url: `/v2/activities?class=DEVICE&before=${beforeTimestamp}&after=${afterTimestamp}&type=SYSTEM&pageSize=200`, type: 'CMD' },
-            { url: `/v2/activities?class=SYSTEM&before=${beforeTimestamp}&after=${afterTimestamp}&status=POLICY_UPDATED&pageSize=200`, type: 'GPO' }
-        ];
+        cortexCount++;
+        allRows.push([
+          e.endpoint_id || "(ID inconnu)",
+          e.endpoint_name || "(Nom inconnu)",
+          osNameRaw.replace(/Microsoft\s*/i,"").trim(),
+          windowsReleaseToHVersion(e.os_version),
+          e.endpoint_version || "(Version agent inconnue)",
+          formatTimestamp(e.last_seen,true)
+        ]);
+      });
 
-        let vBody1 = '', vBody2 = '', vBody3 = '';
-
-        for (const { url, type } of urls) {
-            try {
-                log(`🔹 Requête pour ${type} : ${NINJA_URL + url}`);
-                const resp = await axios.get(NINJA_URL + url, { headers, timeout: 15000 });
-                const activities = resp.data.activities || [];
-                log(`Nombre d'activités pour ${type} : ${activities.length}`);
-
-                let vListeActivities = '';
-                activities.forEach(a => {
-                    const message = a.message || '';
-                    const activityTime = convertTimestampToDate(a.activityTime);
-                    const resourceType = a.data?.message?.params?.resourceType;
-                    const resource = a.data?.message?.params?.resource;
-                    const activityResult = a.activityResult || '';
-                    const additionalInfo = type === 'GPO' ? a.data?.message?.params?.policyName : resource;
-                    const user = type === 'GPO' ? a.data?.message?.params?.appUserName : '';
-
-                    if ((type === 'FS' && resourceType === 'FILE_SYSTEM') ||
-                        (type === 'CMD' && resourceType === 'RTC_TERMINAL') ||
-                        (type === 'GPO')) {
-                        vListeActivities += `<li>${activityTime} => <u>${message}</u> (${resourceType}) => <font color='red'>${additionalInfo}</font> (${activityResult})${user ? ` => ${user}` : ''}</li>`;
-                    }
-                });
-
-                if (vListeActivities) {
-                    if (type === 'FS') vBody1 = "<u><b>Machines dont le filesystem a été exploré</b></u><br><ul>" + vListeActivities + "</ul><br>";
-                    if (type === 'CMD') vBody2 = "<u><b>Machines où la commande cmd a été lancée</b></u><br><ul>" + vListeActivities + "</ul><br>";
-                    if (type === 'GPO') vBody3 = "<u><b>Stratégies modifiées</b></u><br><ul>" + vListeActivities + "</ul><br>";
-                }
-
-            } catch (err) {
-                log(`❌ Erreur activité ${type} : ${err.response?.data || err.message}`);
-            }
-        }
-
-        const vBody = `Bonjour,<br><br>${vBody1}${vBody2}${vBody3}<br>Cordialement`;
-        log('📩 Corps du mail généré.');
-
-        if (vBody1 || vBody2 || vBody3) {
-            sendEmail(vBody, vDateBefore, vDateAfter);
-        } else {
-            log('⚠️ Aucune activité détectée. Pas d’envoi de mail.');
-        }
-
+      const result_count = resp.data.reply.result_count || 0;
+      const total_count = resp.data.reply.total_count || 0;
+      if (result_count < PAGE_SIZE || offset >= total_count) break;
+      offset += PAGE_SIZE;
     } catch (err) {
-        log('❌ Erreur globale du script : ' + err.message);
+      writeLog(`❌ Erreur Cortex XDR : ${err.message}`);
+      break;
     }
+  }
+
+  await writeToSheet(allRows, SHEET_NAME_CORTEX);
+  writeLog(`💻 Nombre de machines Cortex récupérées : ${cortexCount}`);
+  return cortexCount;
 }
 
-// ================= EXEC =================
-AlertesNinja();
+// ----------------- MAIN -----------------
+async function main() {
+  writeLog('🚀 Début exécution globale du script');
+  const ninjaCount = await getNinjaDevices();
+  const cortexCount = await getCortexDevices();
+  writeLog(`🏁 Fin exécution globale. Résultats : Ninja=${ninjaCount}, Cortex=${cortexCount}`);
+  writeLog(` ------------------------------------`);
+}
+
+main();
