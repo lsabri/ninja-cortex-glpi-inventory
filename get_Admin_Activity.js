@@ -1,104 +1,136 @@
 const axios = require('axios');
-require('dotenv').config();
+const dotenv = require('dotenv');
+const nodemailer = require('nodemailer');
+dotenv.config();
 
-// --- CONFIG ---
-const NINJA_URL = process.env.NINJA_URL.replace(/\/$/, "");
+// ----------------- CONFIG -----------------
+const NINJA_URL = process.env.NINJA_URL;
 const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
 const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
-// --- TOKEN ---
+const MAIL_FROM = process.env.MAIL_FROM;
+const MAIL_TO = process.env.MAIL_TO;
+const MAIL_CC = process.env.MAIL_CC;
+
+// ----------------- UTIL -----------------
+function convertTimestampToDate(timestamp) {
+  return new Date(timestamp * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+}
+
+function sendEmail(vBody, vDateBefore, vDateAfter) {
+  const transporter = nodemailer.createTransport({
+    host: 'smtpout.glm.lan',
+    port: 25,
+    secure: false,
+    tls: { rejectUnauthorized: false }
+    // Si nécessaire, ajouter auth : { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+  });
+
+  const mailOptions = {
+    from: MAIL_FROM,
+    to: MAIL_TO,
+    cc: MAIL_CC,
+    subject: `Alertes Ninja : filesystem exploré | command cmd lancée | GPO modifiée. Période de ${vDateAfter} à ${vDateBefore}`,
+    html: `<!DOCTYPE html><html><body>${vBody}</body></html>`
+  };
+
+  transporter.sendMail(mailOptions, (error, info) => {
+    if (error) return console.error('❌ Erreur envoi mail :', error.message);
+    console.log('✅ Mail envoyé :', info.response);
+  });
+}
+
+// ----------------- NINJA -----------------
 async function getAccessToken() {
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: CLIENT_ID_NINJA,
-    client_secret: AUTH_SECRET_NINJA,
-    scope: 'monitoring management control',
-  });
-
-  const resp = await axios.post(`${NINJA_URL}/ws/oauth/token`, body.toString(), {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
-
-  return resp.data.access_token;
+  try {
+    const resp = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      params: {
+        grant_type: 'client_credentials',
+        client_id: CLIENT_ID_NINJA,
+        client_secret: AUTH_SECRET_NINJA,
+        scope: 'monitoring'
+      }
+    });
+    console.log('✅ Token Ninja récupéré');
+    return resp.data.access_token;
+  } catch (err) {
+    console.error('❌ Token KO NinjaOne :', err.response?.data || err.message);
+    return null;
+  }
 }
 
-// --- Date ISO il y a 7 jours ---
-function getIsoOneWeekAgo() {
-  const now = new Date();
-  const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  return oneWeekAgo.toISOString();
-}
-
-// --- NORMALISATION DE LA LISTE D'ACTIVITES ---
-function extractActivities(data) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.results)) return data.results;
-  if (Array.isArray(data.items)) return data.items;
-  console.error('❌ Impossible de trouver un tableau dactivites dans la reponse :', data);
-  return [];
-}
-
-// --- MAIN ---
-(async () => {
+// ----------------- FONCTION PRINCIPALE -----------------
+async function AlertesNinja() {
   try {
     const token = await getAccessToken();
-    const after = getIsoOneWeekAgo();
+    if (!token) return console.error('Impossible de récupérer le token, arrêt du script.');
 
-    const resp = await axios.get(`${NINJA_URL}/api/v2/activities`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: {
-        pageSize: 500,
-        after,
-      },
-    });
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const intervalInSeconds = 3600 / 4; // 15 min
+    const beforeTimestamp = Math.round(Date.now() / 1000);
+    const afterTimestamp = beforeTimestamp - intervalInSeconds;
+    const vDateBefore = convertTimestampToDate(beforeTimestamp);
+    const vDateAfter = convertTimestampToDate(afterTimestamp);
 
-    let activities = extractActivities(resp.data);
-    if (!activities.length) {
-      console.log('Aucune activite trouvee (verifie le parametre `after`).');
-      return;
+    const urls = [
+      { url: `/v2/activities?class=DEVICE&before=${beforeTimestamp}&after=${afterTimestamp}&type=REMOTE_TOOLS&pageSize=200`, type: 'FS' },
+      { url: `/v2/activities?class=DEVICE&before=${beforeTimestamp}&after=${afterTimestamp}&type=SYSTEM&pageSize=200`, type: 'CMD' },
+      { url: `/v2/activities?class=SYSTEM&before=${beforeTimestamp}&after=${afterTimestamp}&status=POLICY_UPDATED&pageSize=200`, type: 'GPO' }
+    ];
+
+    let vBody1 = '', vBody2 = '', vBody3 = '';
+
+    for (const { url, type } of urls) {
+      try {
+        console.log(`🔹 Requête pour ${type} : ${NINJA_URL + url}`);
+        const resp = await axios.get(NINJA_URL + url, { headers });
+        const activities = resp.data.activities || [];
+        console.log(`Nombre d'activités pour ${type} :`, activities.length);
+
+        let vListeActivities = '';
+        activities.forEach(a => {
+          const message = a.message || '';
+          const activityTime = convertTimestampToDate(a.activityTime);
+          const resourceType = a.data?.message?.params?.resourceType;
+          const resource = a.data?.message?.params?.resource;
+          const activityResult = a.activityResult || '';
+          const additionalInfo = type === 'GPO' ? a.data?.message?.params?.policyName : resource;
+          const user = type === 'GPO' ? a.data?.message?.params?.appUserName : '';
+
+          if ((type === 'FS' && resourceType === 'FILE_SYSTEM') ||
+              (type === 'CMD' && resourceType === 'RTC_TERMINAL') ||
+              (type === 'GPO')) {
+            vListeActivities += `<li>${activityTime} => <u>${message}</u> (${resourceType}) => <font color='red'>${additionalInfo}</font> (${activityResult})${user ? ` => ${user}` : ''}</li>`;
+          }
+        });
+
+        if (vListeActivities) {
+          if (type === 'FS') vBody1 = "<u><b>Machines dont le filesystem a été exploré</b></u><br><ul>" + vListeActivities + "</ul><br>";
+          if (type === 'CMD') vBody2 = "<u><b>Machines où la commande cmd a été lancée</b></u><br><ul>" + vListeActivities + "</ul><br>";
+          if (type === 'GPO') vBody3 = "<u><b>Stratégies modifiées</b></u><br><ul>" + vListeActivities + "</ul><br>";
+        }
+
+      } catch (err) {
+        console.error(`❌ Erreur activité ${type} :`, err.response?.data || err.message);
+      }
     }
 
-    // === VALEURS UNIQUES activityType SEULEMENT ===
-    const uniqueTypes = [...new Set(activities.map(a => a.activityType).filter(Boolean))].sort();
-    console.log('\n🎯 activityType UNIQUES :');
-    uniqueTypes.forEach((type, i) => console.log(`${i+1}. ${type}`));
-    console.log('');
+    // --- DEBUG : Afficher le corps du mail ---
+    const vBody = `Bonjour,<br><br>${vBody1}${vBody2}${vBody3}<br>Cordialement`;
+    console.log('📩 Corps du mail :\n', vBody);
 
-    // === Filtre SYSTEM + SCRIPT uniquement ===
-    const TYPES_A_GARDER = ["SYSTEM", "SCRIPT"];
-    
-    const adminActivities = activities.filter(a => {
-      if (!a.activityType) return false;
-      const type = String(a.activityType).toUpperCase();
-      return TYPES_A_GARDER.includes(type);
-    });
-
-    console.log(`\n🔹 Activites SYSTEM / SCRIPT (${adminActivities.length}) :\n`);
-
-    if (adminActivities.length === 0) {
-      console.log('💡 INFO : Aucun SYSTEM/SCRIPT trouve. Regarde les types ci-dessus.');
+    if (vBody1 || vBody2 || vBody3) {
+      sendEmail(vBody, vDateBefore, vDateAfter);
     } else {
-      adminActivities.forEach((a, i) => {
-        const time = a.activityTime
-          ? new Date(
-              Number(a.activityTime) > 10_000_000_000
-                ? Number(a.activityTime)
-                : Number(a.activityTime) * 1000
-            ).toLocaleString()
-          : 'N/A';
-
-        console.log(`${i + 1}. ID: ${a.id}`);
-        console.log(`   Device ID: ${a.deviceId}`);
-        console.log(`   Utilisateur: ${a.subject || "N/A"}`);
-        console.log(`   Type: ${a.activityType}`);
-        console.log(`   Source: ${a.sourceName}`);
-        console.log(`   Statut: ${a.status}`);
-        console.log(`   Date: ${time}`);
-        console.log(`   Message: ${a.message}\n`);
-      });
+      console.log('⚠️ Aucune activité détectée pendant cette période. Pas d’envoie de mail.');
+      //sendEmail("<b>Test : aucune activité détectée sur NinjaOne.</b>", vDateBefore, vDateAfter);
     }
 
-  } catch (error) {
-    console.error('❌ Erreur :', error.response?.data || error.message);
+  } catch (err) {
+    console.error('❌ Erreur globale du script :', err.message);
   }
-})();
+}
+
+// ----------------- EXECUTION -----------------
+AlertesNinja();
