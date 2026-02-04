@@ -19,7 +19,6 @@ const URL_CORTEX = process.env.URL_CORTEX;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
 const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
-const SHEET_NAME_COMPARE = 'COMPARE';
 const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
 
 let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~') 
@@ -275,107 +274,94 @@ async function getCortexDevices() {
   log(`Fin inventaire Cortex  ${new Date().toLocaleString('fr-FR')}`);
 }
 
-// ------ synthese dans le sheet COMPARE ----
-async function buildCompareSheet() {
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: CREDENTIALS_PATH,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
+export async function buildCompareSheet() {
 
-    const sheets = google.sheets({ version: 'v4', auth: await auth.getClient() });
+  const auth = await getAccessToken();
+  if (!auth) return;
 
-    log("📊 Lecture des données Ninja et Cortex...");
+  const sheets = google.sheets({ version: 'v4', auth });
 
-    // 1. Récupération des données en parallèle
-    const [ninjaRes, cortexRes] = await Promise.all([
-      sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: SHEET_NAME_NINJA
-      }),
-      sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: SHEET_NAME_CORTEX
-      })
-    ]);
-
-    const ninjaRows = ninjaRes.data.values || [];
-    const cortexRows = cortexRes.data.values || [];
-
-    const ninjaMap = {};
-    const cortexMap = {};
-
-    // 2. Mapping Ninja (Nom en B [index 1], Last Contact en F [index 5])
-    for (let i = 1; i < ninjaRows.length; i++) {
-      const name = ninjaRows[i][1];
-      if (name) ninjaMap[name] = ninjaRows[i][5] || 'N/C';
-    }
-
-    // 3. Mapping Cortex (Nom en B [index 1], Last Seen en F [index 5])
-    for (let i = 1; i < cortexRows.length; i++) {
-      const name = cortexRows[i][1];
-      if (name) cortexMap[name] = cortexRows[i][5] || 'N/C';
-    }
-
-    // 4. Construction du tableau de comparaison
-    const allDevices = new Set([...Object.keys(ninjaMap), ...Object.keys(cortexMap)]);
-    
-    // Le premier élément du tableau est le Header
-    const compareRows = [
-      ['Nom device', 'Dans Ninja?', 'Last Contact (Ninja)', 'Dans Cortex?', 'Last Seen (Cortex)']
-    ];
-
-    for (const name of Array.from(allDevices).sort()) {
-      compareRows.push([
-        name,
-        ninjaMap[name] ? 'Oui' : 'Non',
-        ninjaMap[name] || '',
-        cortexMap[name] ? 'Oui' : 'Non',
-        cortexMap[name] || ''
-      ]);
-    }
-
-    // 5. Nettoyage de la feuille COMPARE avant écriture
-    log(`🧹 Nettoyage de la feuille ${SHEET_NAME_COMPARE}...`);
-    await sheets.spreadsheets.values.clear({
+  // Lire Ninja & Cortex
+  const [ninjaRes, cortexRes] = await Promise.all([
+    sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_NAME_COMPARE
-    });
-
-    // 6. Écriture groupée (BatchUpdate) pour plus d'efficacité
-    const lastUpdate = `Mis à jour le : ${new Date().toLocaleString('fr-FR')}`;
-
-    log("📝 Écriture des nouvelles données...");
-    await sheets.spreadsheets.values.batchUpdate({
+      range: SHEET_NAME_NINJA
+    }),
+    sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: [
-          {
-            range: `${SHEET_NAME_COMPARE}!A1`,
-            values: [[lastUpdate]] // Date en A1
-          },
-          {
-            range: `${SHEET_NAME_COMPARE}!A2`,
-            values: compareRows // Header en A2 + Données en dessous
-          }
-        ]
-      }
-    });
+      range: SHEET_NAME_CORTEX
+    })
+  ]);
 
-    log(`✅ Succès : ${compareRows.length - 1} devices synchronisés.`);
+  const ninjaRows  = ninjaRes.data.values || [];
+  const cortexRows = cortexRes.data.values || [];
 
-  } catch (err) {
-    log(`❌ Erreur fatale : ${err.message}`);
-    if (err.response) console.error(err.response.data);
+  const ninjaMap  = {};
+  const cortexMap = {};
+
+  // NINJA → Nom + Last Contact
+  for (let i = 1; i < ninjaRows.length; i++) {
+    const name = ninjaRows[i][1]; // B
+    const last = ninjaRows[i][5]; // F
+    if (name) ninjaMap[name] = last || '';
   }
-}
 
+  // CORTEX → Nom + Last Seen
+  for (let i = 1; i < cortexRows.length; i++) {
+    const name = cortexRows[i][1]; // B
+    const last = cortexRows[i][5]; // F
+    if (name) cortexMap[name] = last || '';
+  }
+
+  // Union des devices
+  const allDevices = new Set([
+    ...Object.keys(ninjaMap),
+    ...Object.keys(cortexMap)
+  ]);
+
+  const compareRows = [
+    [
+      'Nom device',
+      'Existe dans Ninja',
+      'Last Contact (Ninja)',
+      'Existe dans Cortex',
+      'Last Seen (Cortex)'
+    ]
+  ];
+
+  for (const name of allDevices) {
+    compareRows.push([
+      name,
+      ninjaMap[name]  ? 'YES' : 'NO',
+      ninjaMap[name]  || '',
+      cortexMap[name] ? 'YES' : 'NO',
+      cortexMap[name] || ''
+    ]);
+  }
+
+  // Nettoyage + écriture
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: SHEET_NAME_COMPARE
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME_COMPARE}!A1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: compareRows }
+  });
+
+  console.log(
+    `COMPARE généré : ${compareRows.length - 1} devices`
+  );
+}
 // ----------------- MAIN -----------------
 async function main() {
   log(`🚀 Début exécution globale ${new Date().toLocaleString('fr-FR')}`);
-  await getNinjaDevices();
-  await getCortexDevices();
+  //await getNinjaDevices();
+ // await getCortexDevices();
+  await  buildCompareSheet();
   log(`🏁 Fin exécution globale ${new Date().toLocaleString('fr-FR')}`);
   log(`------------------`);
 }

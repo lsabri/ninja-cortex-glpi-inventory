@@ -1,82 +1,137 @@
-const axios = require('axios');
+#!/usr/bin/env node
+
 const dotenv = require('dotenv');
+const { google } = require('googleapis');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 
+// Configuration de l'environnement
+process.chdir(__dirname);
 dotenv.config();
 
 // ----------------- CONFIG -----------------
-const NINJA_URL = process.env.NINJA_URL;
-const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
-const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
+const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
+const SHEET_NAME_COMPARE = 'COMPARE';
+const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
 
-let CREDENTIALS_PATH = process.env.CREDENTIALS_PATH;
-if (CREDENTIALS_PATH.startsWith('~')) {
-  CREDENTIALS_PATH = path.join(os.homedir(), CREDENTIALS_PATH.slice(1));
+let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~') 
+  ? path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1)) 
+  : CREDENTIALS_PATH_ENV;
+
+// ----------------- LOGS -----------------
+const logDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+const LOG_FILE = path.join(logDir, 'buildCompareSheet.log');
+
+function log(message) {
+  const date = new Date().toLocaleString('fr-FR');
+  const line = `[${date}] ${message}\n`;
+  fs.appendFileSync(LOG_FILE, line);
+  console.log(line.trim());
 }
 
-console.log('🔍CREDENTIALS_PATH', CREDENTIALS_PATH);
-
-// ----------------- NINJA ENDPOINT -----------------
-const endpoint = '/api/v2/activities';
-
-// === OBTENTION DU TOKEN ===
-async function getAccessToken() {
+// ----------------- FONCTION PRINCIPALE -----------------
+async function buildCompareSheet() {
   try {
-    const response = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      params: {
-        grant_type: 'client_credentials',
-        client_id: CLIENT_ID_NINJA,
-        client_secret: AUTH_SECRET_NINJA,
-        scope: 'monitoring'
+    const auth = new google.auth.GoogleAuth({
+      keyFile: CREDENTIALS_PATH,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+
+    const sheets = google.sheets({ version: 'v4', auth: await auth.getClient() });
+
+    log("📊 Lecture des données Ninja et Cortex...");
+
+    // 1. Récupération des données en parallèle
+    const [ninjaRes, cortexRes] = await Promise.all([
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: SHEET_NAME_NINJA
+      }),
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: SHEET_NAME_CORTEX
+      })
+    ]);
+
+    const ninjaRows = ninjaRes.data.values || [];
+    const cortexRows = cortexRes.data.values || [];
+
+    const ninjaMap = {};
+    const cortexMap = {};
+
+    // 2. Mapping Ninja (Nom en B [index 1], Last Contact en F [index 5])
+    for (let i = 1; i < ninjaRows.length; i++) {
+      const name = ninjaRows[i][1];
+      if (name) ninjaMap[name] = ninjaRows[i][5] || 'N/C';
+    }
+
+    // 3. Mapping Cortex (Nom en B [index 1], Last Seen en F [index 5])
+    for (let i = 1; i < cortexRows.length; i++) {
+      const name = cortexRows[i][1];
+      if (name) cortexMap[name] = cortexRows[i][5] || 'N/C';
+    }
+
+    // 4. Construction du tableau de comparaison
+    const allDevices = new Set([...Object.keys(ninjaMap), ...Object.keys(cortexMap)]);
+    
+    // Le premier élément du tableau est le Header
+    const compareRows = [
+      ['Nom device', 'Dans Ninja?', 'Last Contact (Ninja)', 'Dans Cortex?', 'Last Seen (Cortex)']
+    ];
+
+    for (const name of Array.from(allDevices).sort()) {
+      compareRows.push([
+        name,
+        ninjaMap[name] ? 'Oui' : 'Non',
+        ninjaMap[name] || '',
+        cortexMap[name] ? 'Oui' : 'Non',
+        cortexMap[name] || ''
+      ]);
+    }
+
+    // 5. Nettoyage de la feuille COMPARE avant écriture
+    log(`🧹 Nettoyage de la feuille ${SHEET_NAME_COMPARE}...`);
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: SHEET_NAME_COMPARE
+    });
+
+    // 6. Écriture groupée (BatchUpdate) pour plus d'efficacité
+    const lastUpdate = `Mis à jour le : ${new Date().toLocaleString('fr-FR')}`;
+
+    log("📝 Écriture des nouvelles données...");
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: [
+          {
+            range: `${SHEET_NAME_COMPARE}!A1`,
+            values: [[lastUpdate]] // Date en A1
+          },
+          {
+            range: `${SHEET_NAME_COMPARE}!A2`,
+            values: compareRows // Header en A2 + Données en dessous
+          }
+        ]
       }
     });
-    return response.data.access_token;
-  } catch (error) {
-    console.error('❌ Erreur lors de l\'obtention du jeton d\'accès :', error.message);
-    return null;
+
+    log(`✅ Succès : ${compareRows.length - 1} devices synchronisés.`);
+
+  } catch (err) {
+    log(`❌ Erreur fatale : ${err.message}`);
+    if (err.response) console.error(err.response.data);
   }
 }
 
-// === GET ACTIVITIES ET DEBUG ===
-async function getAllActivities() {
-  try {
-    const accessToken = await getAccessToken();
-    if (!accessToken) throw new Error("Échec de l'authentification");
-
-    const response = await axios.get(`${NINJA_URL}${endpoint}`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const rawData = response.data;
-
-    // Trouver le tableau d'activités
-    let activities = Array.isArray(rawData) ? rawData : Object.values(rawData).find(Array.isArray);
-    if (!activities) throw new Error("Aucun tableau d'activités trouvé dans la réponse.");
-
-    // Afficher toutes les activités pour inspection
-    console.log('📦 Toutes les activités :', JSON.stringify(activities, null, 2));
-
-    // Lister tous les utilisateurs et rôles présents
-    const users = activities.map(a => ({
-      userName: a.userName || a.user || 'N/A',
-      userRole: a.userRole || a.role || 'N/A'
-    }));
-    console.log('🧾 Tous les utilisateurs/roles :', users);
-
-    // Retourner les activités pour filtrage ultérieur
-    return activities;
-
-  } catch (error) {
-    console.error('❌ Erreur lors de la récupération des activités :',
-      error.response?.data || error.message);
-    return null;
-  }
-}
-
-// === EXÉCUTION ===
-getAllActivities();
+// ----------------- EXÉCUTION -----------------
+(async function main() {
+  log(`🚀 Démarrage du script`);
+  await buildCompareSheet();
+  log(`🏁 Fin du script`);
+})();
