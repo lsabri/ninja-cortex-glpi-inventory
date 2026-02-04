@@ -39,9 +39,9 @@ function sendEmail(vBody) {
 
     const mailOptions = {
         from: 'alertes.ninjaOne@lemonde.fr',
-        to: 'lemarchand@lemonde.fr,nguyen@lemonde.fr',
-        cc: 'sabri@lemonde.fr,volante@lemonde.fr',
-        subject: `Alertes Ninja from srvasi: Devices en doublons`,
+        to: 'lemarchand@lemonde.fr,presta-aodzayibo@vmmagazines.com',
+        cc: 'sabri@lemonde.fr,volante@lemonde.fr,nguyen@lemonde.fr',
+        subject: `Alertes Ninja from srvasi: Devices en doublons dans Ninja`,
         html: vBody
     };
 
