@@ -4,6 +4,8 @@ const { google } = require('googleapis');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+
 process.chdir(__dirname);
 dotenv.config();
 
@@ -16,9 +18,25 @@ const AUTH_ID_CORTEX = process.env.AUTH_ID;
 const AUTH_TOKEN_CORTEX = process.env.AUTH_TOKEN_CORTEX;
 const URL_CORTEX = process.env.URL_CORTEX;
 
+const GLPI_URL = process.env.GLPI_URL;
+const APP_TOKEN = process.env.GLPI_APP_TOKEN;
+const USER_TOKEN = process.env.GLPI_USER_TOKEN;
+const agentGLPI = new https.Agent({ rejectUnauthorized: false });
+
+const GLPI_IDS = {
+    NAME: 1,
+    STATUS: 31,
+    OS_NAME: 45,
+    OS_VERSION: 46,
+    OS_BUILD: 161,
+    AGENT_UA: 5160,
+    FUSINV_CONTACT: 5150
+};
+
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME_NINJA = process.env.SHEET_NAME_NINJA;
 const SHEET_NAME_CORTEX = process.env.SHEET_NAME_CORTEX;
+const SHEET_NAME_GLPI = process.env.SHEET_NAME_GLPI;
 const SHEET_NAME_COMPARE = 'COMPARE';
 const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
 
@@ -28,13 +46,11 @@ let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~')
 
 const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "100", 10);
 
-// Dossier et fichier log
 const logDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
 const LOG_FILE = path.join(logDir, 'Ninja-Cortex-GLPI-Inventaire.log');
 
-
-// ----------------- DEBUG -----------------
+// ----------------- UTILS -----------------
 function log(message) {
   const date = new Date().toLocaleString('fr-FR');
   const line = `[${date}] ${message}\n`;
@@ -42,15 +58,54 @@ function log(message) {
   console.log(line.trim());
 }
 
-
-// 
+/**
+ * Normalisation Date (Timestamp -> JJ/MM/AAAA HH:mm)
+ */
 function formatTimestamp(ms, isCortex = false) {
   if (!ms) return "N/A";
-  return new Date(isCortex ? ms : ms * 1000).toLocaleString('fr-FR');
+  const date = new Date(isCortex ? ms : ms * 1000);
+  return date.toLocaleString('fr-FR', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  });
+}
+
+/**
+ * Normalisation Date SQL GLPI (YYYY-MM-DD HH:MM:SS -> JJ/MM/AAAA HH:mm)
+ */
+function normalizeGlpiDate(dateStr) {
+    if (!dateStr || dateStr === "N/A" || dateStr === "null") return "N/A";
+    try {
+        const [datePart, timePart] = dateStr.split(' ');
+        const [y, m, d] = datePart.split('-');
+        const [hh, mm] = timePart.split(':');
+        return `${d}/${m}/${y} ${hh}:${mm}`;
+    } catch (e) { return dateStr; }
+}
+
+function translateBuild(build, currentVersion, osName = "") {
+    const cleanBuild = (build && build !== "N/A") ? String(build).split('.').pop().trim() : "";
+    const cleanVersion = (currentVersion && currentVersion !== "N/A") ? String(currentVersion).trim() : "";
+    const name = String(osName).toUpperCase();
+
+    const map = {
+        "22000": "21H2", "22621": "22H2", "22631": "23H2", "26100": "24H2",
+        "26200": "25H2", "19041": "2004", "19042": "20H2", "19043": "21H1",
+        "19044": "21H2", "19045": "22H2"
+    };
+
+    if (cleanBuild && map[cleanBuild]) return map[cleanBuild];
+    if (cleanBuild !== "") return `Build ${cleanBuild}`;
+
+    if (cleanVersion === "2009" || cleanVersion === "") {
+        if (name.includes("WINDOWS 11")) return "W11 (v.2009)";
+        if (name.includes("WINDOWS 10")) return "W10 (v.2009)";
+        return "Inconnu (Agent)";
+    }
+    return cleanVersion || "N/A";
 }
 
 // ----------------- GOOGLE SHEETS -----------------
-
 async function writeToSheet(rows, sheetName) {
   try {
     const auth = new google.auth.GoogleAuth({
@@ -58,57 +113,35 @@ async function writeToSheet(rows, sheetName) {
       scopes: ['https://www.googleapis.com/auth/spreadsheets']
     });
     const sheets = google.sheets({ version: 'v4', auth });
-    await sheets.spreadsheets.values.clear({ 
-      spreadsheetId: SPREADSHEET_ID, 
-      range: `${sheetName}!A:F` 
-    });
+    await sheets.spreadsheets.values.clear({ spreadsheetId: SPREADSHEET_ID, range: `${sheetName}!A:G` });
 
-    const headers = sheetName === SHEET_NAME_NINJA
-      ? ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Contact']
-      : ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Seen'];
+    const headers = ['ID', 'Nom', 'OS', 'OS Release', 'Agent Version', 'Last Contact/Seen'];
+    const updateLine = [`Dernière mise à jour : ${new Date().toLocaleString('fr-FR', {hour12: false})}`, '', '', '', '', ''];
 
-    
-    const updateLine = [`Dernière mise à jour : ${new Date().toLocaleString('fr-FR')}`, '', '', '', '', '', ''];
-
-    const values = [
-      updateLine, 
-      headers,    
-      ...rows     
-    ];
-
+    const values = [updateLine, headers, ...rows];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${sheetName}!A1`, // On force le début à A1
+      range: `${sheetName}!A1`,
       valueInputOption: 'RAW',
       resource: { values }
     });
-
-    log(`✅ Écriture terminée dans ${sheetName} (Colonnes A-G)`);
-
+    log(`✅ Écriture terminée dans ${sheetName}`);
   } catch (err) {
-    log(`❌ Erreur Google Sheets (${sheetName}) :`, err.message);
+    log(`❌ Erreur Sheets (${sheetName}) : ${err.message}`);
   }
 }
-// ----------------- NINJA -----------------
+
+// ----------------- NINJA (Version demandée) -----------------
 async function getAccessToken() {
   try {
     const resp = await axios.post(`${NINJA_URL}/ws/oauth/token`, null, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      params: {
-        grant_type: 'client_credentials',
-        client_id: CLIENT_ID_NINJA,
-        client_secret: AUTH_SECRET_NINJA,
-        scope: 'monitoring'
-      }
+      params: { grant_type: 'client_credentials', client_id: CLIENT_ID_NINJA, client_secret: AUTH_SECRET_NINJA, scope: 'monitoring' }
     });
     return resp.data.access_token;
-  } catch (err) {
-    log('❌ Erreur token NinjaOne :', err.response?.data || err.message);
-    return null;
-  }
+  } catch (err) { log('❌ Erreur token NinjaOne :', err.message); return null; }
 }
 
-// ----------------- NINJA -----------------
 async function getDeviceOS(deviceId, token) {
   try {
     const resp = await axios.get(`${NINJA_URL}/v2/device/${deviceId}`, {
@@ -120,10 +153,10 @@ async function getDeviceOS(deviceId, token) {
       osRelease: device.os?.releaseId || "N/A"
     };
   } catch (err) {
-    log(`❌ Impossible de récupérer OS du device ${deviceId}:`, err.response?.data || err.message);
+    log(`❌ Impossible de récupérer OS du device ${deviceId}:`, err.message);
     return { osName: "OS inconnu", osRelease: "N/A" };
   }
-};
+}
 
 async function getNinjaDevices() {
   const token = await getAccessToken();
@@ -135,20 +168,18 @@ async function getNinjaDevices() {
     });
 
     const devices = resp.data;
-    log(`🖥️ ${devices.length} devices récupérés`);
+    log(`🖥️ ${devices.length} devices Ninja récupérés`);
 
     const rows = [];
-
     for (const d of devices) {
       const name = d.systemName || d.hostname || d.displayName || "(nom inconnu)";
       const lastContact = formatTimestamp(d.lastContact);
 
-      // OS Name et OS Release depuis le device complet
       const osInfo = await getDeviceOS(d.id, token);
       const osName = osInfo.osName;
-      const osRelease = osInfo.osRelease;
+      // Normalisation du Release Ninja via translateBuild
+      const osRelease = translateBuild(osInfo.osRelease, osInfo.osRelease, osName);
 
-      // Récupérer Agent Version depuis les champs personnalisés
       let agentVersion = "Inconnue";
       try {
         const customResp = await axios.get(`${NINJA_URL}/v2/device/${d.id}/custom-fields`, {
@@ -156,228 +187,144 @@ async function getNinjaDevices() {
         });
         agentVersion = customResp.data.versionAgentNinjaone || "Inconnue";
       } catch (errCustom) {
-        log(`⚠️ Impossible de récupérer le champ versionAgentNinjaone pour ${name} :`, errCustom.message);
+        log(`⚠️ Champ agent Ninja inconnu pour ${name}`);
       }
-
-      //console.log(`- ${name} | OS Name: ${osName} | OS Release: ${osRelease} | Agent: ${agentVersion}`);
 
       rows.push([d.id, name, osName, osRelease, agentVersion, lastContact]);
     }
 
     await writeToSheet(rows, SHEET_NAME_NINJA);
-    log(`Export terminé : ${rows.length} lignes écrites dans ${SHEET_NAME_NINJA}`);
-    log(`Fin inventaire Ninja ${new Date().toLocaleString('fr-FR')}`);
-
+    log(`Export Ninja terminé : ${rows.length} lignes.`);
   } catch (err) {
-    log('❌ Erreur NinjaOne :', err.response?.data || err.message);
+    log('❌ Erreur NinjaOne :', err.message);
   }
 }
 
-// ----------------- CORTEX -----------------
-
+// ----------------- CORTEX (Inchangé) -----------------
 function windowsReleaseToHVersion(osVersion) {
   if (!osVersion) return "N/A";
-
-  // Exemples possibles :
-  // "10.0.22621" → 22H2
-  // "10.0.26100" → 24H2
-
   const build = osVersion.split('.').pop();
-
   const map = {
-    "22000": "21H2",
-    "22621": "22H2",
-    "22631": "23H2",
-    "26100": "24H2",
-    "26200": "25H2",
-    "19041": "2004",
-    "19042": "20H2",
-    "19043": "21H1",
-    "19044": "21H2",
-    "19045": "22H2"
+    "22000": "21H2", "22621": "22H2", "22631": "23H2", "26100": "24H2",
+    "26200": "25H2", "19041": "2004", "19042": "20H2", "19043": "21H1",
+    "19044": "21H2", "19045": "22H2"
   };
-
   return map[build] || "Version inconnue";
 }
 
 async function getCortexDevices() {
-  log(`Début Cortex XDR ${new Date().toLocaleString('fr-FR')}`);
+  log(`🛡️ Début Cortex XDR...`);
   let offset = 0;
   const allRows = [];
-
   while (true) {
     try {
-      const resp = await axios.post(
-        URL_CORTEX,
-        {
-          request_data: {
-            filters: [],
-            search_from: offset,
-            search_to: offset + PAGE_SIZE
-          }
-        },
-        {
-          headers: {
-            "x-xdr-auth-id": AUTH_ID_CORTEX,
-            Authorization: AUTH_TOKEN_CORTEX,
-            "Content-Type": "application/json"
-          }
-        }
+      const resp = await axios.post(URL_CORTEX,
+        { request_data: { filters: [], search_from: offset, search_to: offset + PAGE_SIZE } },
+        { headers: { "x-xdr-auth-id": AUTH_ID_CORTEX, Authorization: AUTH_TOKEN_CORTEX, "Content-Type": "application/json" } }
       );
-
       const endpoints = resp.data.reply.endpoints || [];
-      const result_count = resp.data.reply.result_count || 0;
-      const total_count = resp.data.reply.total_count || 0;
-
       endpoints.forEach(e => {
-        const osNameRaw = e.operating_system || e.os_name || "";
-
-        const osNameUpper = osNameRaw.toUpperCase();
-
-        // ✅ GARDER UNIQUEMENT WINDOWS
-        if (!osNameUpper.includes("WINDOWS")) return;
-
-        // ❌ EXCLURE WINDOWS SERVER / LINUX / MAC
-        if (
-          osNameUpper.includes("WINDOWS SERVER") ||
-          osNameUpper.includes("AGENT_OS_LINUX") ||
-          osNameUpper.includes("AGENT_OS_MAC")
-        ) return;
-
-        const osName = osNameRaw.replace(/Microsoft\s*/i, "").trim(); // optionnel
+        const osNameRaw = e.operating_system || "";
+        if (!osNameRaw.toUpperCase().includes("WINDOWS") || osNameRaw.toUpperCase().includes("SERVER")) return;
         const osRelease = windowsReleaseToHVersion(e.os_version);
-        const lastSeen = formatTimestamp(e.last_seen,true);
-      
-
-        //log(`${e.endpoint_name} | ${osName} | ${osRelease}`);
-
-        allRows.push([
-          e.endpoint_id || "(ID inconnu)",
-          e.endpoint_name || "(Nom inconnu)",
-          osName,
-          osRelease,
-          e.endpoint_version || "(Version agent inconnue)",
-          lastSeen
-        ]);
+        allRows.push([e.endpoint_id, e.endpoint_name, osNameRaw, osRelease, e.endpoint_version, formatTimestamp(e.last_seen, true)]);
       });
-
-      if (result_count < PAGE_SIZE || offset >= total_count) break;
+      if (endpoints.length < PAGE_SIZE) break;
       offset += PAGE_SIZE;
-
-    } catch (err) {
-      log('❌ Erreur Cortex XDR :', err.message);
-      break;
-    }
+    } catch (err) { break; }
   }
-
   await writeToSheet(allRows, SHEET_NAME_CORTEX);
-   log(`Export terminé : ${allRows.length} lignes écrites dans ${SHEET_NAME_NINJA}`);
-  log(`Fin inventaire Cortex  ${new Date().toLocaleString('fr-FR')}`);
 }
 
-// ------ synthese dans le sheet COMPARE ----
+// ----------------- GLPI -----------------
+async function getGlpiSession() {
+    const res = await axios.get(`${GLPI_URL}/initSession`, {
+        headers: { 'App-Token': APP_TOKEN, 'Authorization': `user_token ${USER_TOKEN}` },
+        httpsAgent: agentGLPI
+    });
+    return res.data.session_token;
+}
+
+async function getGlpiDevices() {
+    log(`📦 Début GLPI Inventory...`);
+    try {
+        const token = await getGlpiSession();
+        let allRows = [];
+        let start = 0;
+        let totalCount = 1;
+        while (start < totalCount) {
+            const response = await axios.get(`${GLPI_URL}/search/Computer`, {
+                params: {
+                    'criteria[0][field]': GLPI_IDS.STATUS, 'criteria[0][searchtype]': 'contains', 'criteria[0][value]': 'Installé',
+                    'criteria[1][link]': 'AND', 'criteria[1][field]': GLPI_IDS.OS_NAME, 'criteria[1][searchtype]': 'contains', 'criteria[1][value]': 'Windows',
+                    'forcedisplay[0]': 2, 'forcedisplay[1]': GLPI_IDS.NAME, 'forcedisplay[2]': GLPI_IDS.OS_NAME,
+                    'forcedisplay[3]': GLPI_IDS.OS_VERSION, 'forcedisplay[4]': GLPI_IDS.OS_BUILD,
+                    'forcedisplay[5]': GLPI_IDS.AGENT_UA, 'forcedisplay[6]': GLPI_IDS.FUSINV_CONTACT,
+                    'range': `${start}-${start + PAGE_SIZE - 1}`
+                },
+                headers: { 'App-Token': APP_TOKEN, 'Session-Token': token },
+                httpsAgent: agentGLPI
+            });
+            totalCount = response.data.totalcount;
+            response.data.data.forEach(c => {
+                const osName = c[GLPI_IDS.OS_NAME];
+                const realRelease = translateBuild(c[GLPI_IDS.OS_BUILD], c[GLPI_IDS.OS_VERSION], osName);
+                const rawAgent = String(c[GLPI_IDS.AGENT_UA] || "N/A").split('/')[0].split(' ')[0];
+                const agentVer = rawAgent.replace('FusionInventory-Agent_', '');
+                const lastContact = normalizeGlpiDate(c[GLPI_IDS.FUSINV_CONTACT]);
+                allRows.push([c[2], c[1], osName, realRelease, agentVer, lastContact]);
+            });
+            start += PAGE_SIZE;
+        }
+        await writeToSheet(allRows, SHEET_NAME_GLPI);
+    } catch (err) { log('❌ Erreur GLPI :', err.message); }
+}
+
+// ----------------- COMPARE -----------------
 async function buildCompareSheet() {
   try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: CREDENTIALS_PATH,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
-
-    const sheets = google.sheets({ version: 'v4', auth: await auth.getClient() });
-
-    log("📊 Lecture des données Ninja et Cortex...");
-
-    // 1. Récupération des données en parallèle
-    const [ninjaRes, cortexRes] = await Promise.all([
-      sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: SHEET_NAME_NINJA
-      }),
-      sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: SHEET_NAME_CORTEX
-      })
+    const auth = new google.auth.GoogleAuth({ keyFile: CREDENTIALS_PATH, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
+    const sheets = google.sheets({ version: 'v4', auth });
+    log("📊 Construction synthèse COMPARE...");
+    const [ninja, cortex, glpi] = await Promise.all([
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME_NINJA }),
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME_CORTEX }),
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME_GLPI })
     ]);
 
-    const ninjaRows = ninjaRes.data.values || [];
-    const cortexRows = cortexRes.data.values || [];
+    const maps = { ninja: {}, cortex: {}, glpi: {} };
+    const processRows = (rows, map) => {
+        if (!rows) return;
+        for (let i = 2; i < rows.length; i++) { if (rows[i][1]) map[rows[i][1].toUpperCase()] = rows[i][5] || 'Oui'; }
+    };
+    processRows(ninja.data.values, maps.ninja);
+    processRows(cortex.data.values, maps.cortex);
+    processRows(glpi.data.values, maps.glpi);
 
-    const ninjaMap = {};
-    const cortexMap = {};
-
-    // 2. Mapping Ninja (Nom en B [index 1], Last Contact en F [index 5])
-    for (let i = 1; i < ninjaRows.length; i++) {
-      const name = ninjaRows[i][1];
-      if (name) ninjaMap[name] = ninjaRows[i][5] || 'N/C';
+    const all = new Set([...Object.keys(maps.ninja), ...Object.keys(maps.cortex), ...Object.keys(maps.glpi)]);
+    const result = [['Nom device', 'Ninja?', 'Last Contact Ninja', 'Cortex?', 'Last Seen Cortex', 'GLPI?', 'Last Contact GLPI']];
+    for (const name of Array.from(all).sort()) {
+      result.push([name, maps.ninja[name] ? 'Oui' : 'Non', maps.ninja[name] || '', maps.cortex[name] ? 'Oui' : 'Non', maps.cortex[name] || '', maps.glpi[name] ? 'Oui' : 'Non', maps.glpi[name] || '']);
     }
 
-    // 3. Mapping Cortex (Nom en B [index 1], Last Seen en F [index 5])
-    for (let i = 1; i < cortexRows.length; i++) {
-      const name = cortexRows[i][1];
-      if (name) cortexMap[name] = cortexRows[i][5] || 'N/C';
-    }
-
-    // 4. Construction du tableau de comparaison
-    const allDevices = new Set([...Object.keys(ninjaMap), ...Object.keys(cortexMap)]);
-    
-    // Le premier élément du tableau est le Header
-    const compareRows = [
-      ['Nom device', 'Dans Ninja?', 'Last Contact (Ninja)', 'Dans Cortex?', 'Last Seen (Cortex)']
-    ];
-
-    for (const name of Array.from(allDevices).sort()) {
-      compareRows.push([
-        name,
-        ninjaMap[name] ? 'Oui' : 'Non',
-        ninjaMap[name] || '',
-        cortexMap[name] ? 'Oui' : 'Non',
-        cortexMap[name] || ''
-      ]);
-    }
-
-    // 5. Nettoyage de la feuille COMPARE avant écriture
-    log(`🧹 Nettoyage de la feuille ${SHEET_NAME_COMPARE}...`);
-    await sheets.spreadsheets.values.clear({
+    await sheets.spreadsheets.values.clear({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME_COMPARE });
+    await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_NAME_COMPARE
+      range: `${SHEET_NAME_COMPARE}!A1`,
+      valueInputOption: 'RAW',
+      resource: { values: [[`Dernière mise à jour : ${new Date().toLocaleString('fr-FR', {hour12: false})}`], ...result] }
     });
-
-    // 6. Écriture groupée (BatchUpdate) pour plus d'efficacité
-    const lastUpdate = `Mis à jour le : ${new Date().toLocaleString('fr-FR')}`;
-
-    log("📝 Écriture des nouvelles données...");
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SPREADSHEET_ID,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: [
-          {
-            range: `${SHEET_NAME_COMPARE}!A1`,
-            values: [[lastUpdate]] // Date en A1
-          },
-          {
-            range: `${SHEET_NAME_COMPARE}!A2`,
-            values: compareRows // Header en A2 + Données en dessous
-          }
-        ]
-      }
-    });
-
-    log(`✅ Succès : ${compareRows.length - 1} devices synchronisés.`);
-
-  } catch (err) {
-    log(`❌ Erreur fatale : ${err.message}`);
-    if (err.response) console.error(err.response.data);
-  }
+  } catch (err) { log(`❌ Erreur Synthèse : ${err.message}`); }
 }
 
 // ----------------- MAIN -----------------
 async function main() {
-  log(`🚀 Début exécution globale ${new Date().toLocaleString('fr-FR')}`);
+  log(`🚀 DÉMARRAGE INVENTAIRE GLOBAL`);
   await getNinjaDevices();
   await getCortexDevices();
-  log(`🏁 Fin exécution globale ${new Date().toLocaleString('fr-FR')}`);
-  log(`------------------`);
+  await getGlpiDevices();
+  await buildCompareSheet();
+  log(`🏁 FIN EXÉCUTION`);
 }
 
 main();

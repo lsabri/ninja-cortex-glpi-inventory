@@ -1,17 +1,13 @@
-#!/usr/bin/env node
-
 const axios = require('axios');
-const https = require('https');
 const dotenv = require('dotenv');
-process.chdir(__dirname);
+
+// Configure le chemin vers le fichier .env
 dotenv.config();
 
 // ================= CONFIG =================
-const GLPI_URL = process.env.GLPI_URL;           // ex: https://glpi.local/apirest.php
-const APP_TOKEN = process.env.GLPI_APP_TOKEN;   // jeton API / App Token
-const USER_TOKEN = process.env.GLPI_USER_TOKEN; // jeton personnel / User Token
-
-
+const GLPI_URL = process.env.GLPI_URL;
+const APP_TOKEN = process.env.GLPI_APP_TOKEN;
+const USER_TOKEN = process.env.GLPI_USER_TOKEN;
 
 // Debug des variables d'environnement
 console.log('--- DEBUG ENV VARS ---');
@@ -25,57 +21,29 @@ if (!GLPI_URL || !APP_TOKEN || !USER_TOKEN) {
     process.exit(1);
 }
 
-// ================= HTTPS AGENT =================
-const agent = new https.Agent({ rejectUnauthorized: false }); // pour certificats auto-signés
-
-// ================= API AXIOS =================
-const api = axios.create({
-    baseURL: GLPI_URL,
-    headers: {
+async function getSession() {
+  try {
+    const response = await axios.get(`${GLPI_URL}/initSession`, {
+      headers: {
+        'Content-Type': 'application/json',
         'App-Token': APP_TOKEN,
-        'Authorization': `user_token ${USER_TOKEN}`,
-        'Content-Type': 'application/json'
-    },
-    httpsAgent: agent,
-    timeout: 10000
-});
+        'Authorization': `user_token ${USER_TOKEN}` 
+      }
+    });
 
-// ================= UTIL =================
-function log(msg) {
-    const date = new Date().toLocaleString('fr-FR');
-    console.log(`[${date}] ${msg}`);
+    const sessionToken = response.data.session_token;
+    console.log("✅ Session Token obtenu:", sessionToken);
+    return sessionToken;
+  } catch (error) {
+    console.error("❌ Erreur d'auth :", error.response?.data || error.message);
+  }
 }
 
-// ================= SCRIPT SIMPLE =================
-async function main() {
-    try {
-        // 1️⃣ Ouvrir la session
-        const initResp = await api.post('/initSession', {});
-        const sessionToken = initResp.data.session_token;
-        log('✅ Session ouverte GLPI');
-
-        // 2️⃣ Récupérer la liste des ordinateurs
-        const resp = await api.get('/Computer', {
-            headers: { 'Session-Token': sessionToken }
-        });
-
-        const computers = resp.data;
-        log(`Nombre d'ordinateurs récupérés : ${computers.length}`);
-
-        computers.forEach(c => {
-            console.log(`${c.id} - ${c.name || 'N/A'} - ${c.serial || 'SN inconnu'}`);
-        });
-
-        // 3️⃣ Fermer la session
-        await api.post('/killSession', {}, {
-            headers: { 'Session-Token': sessionToken }
-        });
-        log('✅ Session fermée GLPI');
-        
-    } catch (err) {
-        log('❌ Erreur API GLPI: ' + (err.response?.data || err.message));
-    }
-}
-
-// ================= EXEC =================
-main();
+// Correction du "await" final pour CommonJS
+getSession()
+  .then(token => {
+    if (token) console.log("Prêt pour la suite !");
+  })
+  .catch(err => {
+    console.error("Erreur fatale:", err);
+  });
