@@ -14,8 +14,9 @@
     "dotenv": "^17.2.3",
     "googleapis": "^170.1.0",
     "lodash": "^4.17.21",
-    "nodemailer": "^6.9.13",
+    "nodemailer": "^8.0.1",
     "os": "^0.1.2",
-    "path": "^0.12.7"
+    "path": "^0.12.7",
+    "puppeteer": "^24.37.2"
   }
 }
