@@ -39,6 +39,7 @@ function sendEmail(vBody) {
 
     const mailOptions = {
         from: 'alertes.ninjaOne@lemonde.fr',
+        //to: 'sabri@lemonde.fr',
         to: 'lemarchand@lemonde.fr,presta-aodzayibo@vmmagazines.com',
         cc: 'sabri@lemonde.fr,volante@lemonde.fr,nguyen@lemonde.fr',
         subject: `Alertes Ninja from srvasi: Devices en doublons dans Ninja`,
@@ -98,7 +99,7 @@ async function getDevices(accessToken) {
 }
 
 // ================= MAIN =================
-async function main() {
+async function mainOLD() {
     log('Script lancé');
 
     const token = await getAccessToken();
@@ -149,5 +150,75 @@ async function main() {
       log(' ------------------ ');
 }
 
+//
+// ================= MAIN =================
+async function main() {
+    log('Script lancé');
+
+    const token = await getAccessToken();
+    if (!token) return log('Impossible de récupérer le token, arrêt du script.');
+
+    const devices = await getDevices(token);
+    if (!devices.length) return log('Aucun device récupéré.');
+
+    // 1. Regrouper les devices par Serial Number
+    const groups = {};
+    devices.forEach(d => {
+        if (!groups[d.sn]) {
+            groups[d.sn] = [];
+        }
+        groups[d.sn].push(d);
+    });
+
+    const doublons = [];
+    const aSupprimer = [];
+
+    // 2. Analyser chaque groupe
+    for (const sn in groups) {
+        const group = groups[sn];
+
+        if (group.length > 1) {
+            // On a des doublons pour ce SN
+            log(`Doublons trouvés pour SN: ${sn} (${group.length} instances)`);
+            
+            // Ajouter tous les membres du groupe à la liste d'affichage
+            doublons.push(...group);
+
+            // Trier le groupe par ID (croissant)
+            // On garde le plus grand ID (le plus récent a priori) et on propose de supprimer les autres
+            group.sort((a, b) => a.id - b.id);
+            
+            // Tout sauf le dernier élément du groupe trié va dans "aSupprimer"
+            const toDelete = group.slice(0, group.length - 1);
+            aSupprimer.push(...toDelete);
+        }
+    }
+
+    // 3. Envoi du mail si nécessaire
+    if (doublons.length) {
+        const body = `
+            Bonjour,<br><br>
+            Voici les devices détectés en doublons (même numéro de série):<br>
+            <table border="1" style="border-collapse: collapse; width: 100%;">
+                <tr style="background-color: #f2f2f2;">
+                    <th style="padding: 8px;">ID</th><th>Nom Système</th><th>Serial Number</th>
+                </tr>
+                ${doublons.map(d => `<tr><td style="padding: 8px;">${d.id}</td><td>${d.systemName}</td><td><b>${d.sn}</b></td></tr>`).join('')}
+            </table>
+            <br>
+            <b>🚨 Devices suggérés à la suppression (ID les plus anciens) :</b><br>
+            <ul>
+                ${aSupprimer.map(d => `<li>ID: <b>${d.id}</b> | Nom: ${d.systemName} | SN: ${d.sn}</li>`).join('')}
+            </ul>
+        `;
+        sendEmail(body);
+        log(`Analyse terminée : ${doublons.length} doublons listés, ${aSupprimer.length} à supprimer.`);
+    } else {
+        log('Pas de doublons trouvés');
+    }
+
+    log('Script terminé\n');
+    log(' ------------------ ');
+}
 // ================= EXEC =================
 main();
