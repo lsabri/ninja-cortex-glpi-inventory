@@ -17,7 +17,7 @@ const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
 const MAIL_FROM = "alertes.ninjaOne@lemonde.fr";
 const MAIL_TO = "volante@lemonde.fr,presta-srahmouni@vmmagazines.com"
-const MAIL_CC = "vsabri@lemonde.fr";
+const MAIL_CC = "sabri@lemonde.fr";
 
 // Dossier et fichier log
 const logDir = path.join(__dirname, 'logs');
