@@ -60,36 +60,57 @@ async function buildCompareSheet() {
     const ninjaRows = ninjaRes.data.values || [];
     const cortexRows = cortexRes.data.values || [];
 
-    const ninjaMap = {};
-    const cortexMap = {};
+    const ninjaMap = new Map();
+    const cortexMap = new Map();
 
     // 2. Mapping Ninja (Nom en B [index 1], Last Contact en F [index 5])
+    // On commence à i=1 pour sauter l'entête
     for (let i = 1; i < ninjaRows.length; i++) {
-      const name = ninjaRows[i][1];
-      if (name) ninjaMap[name] = ninjaRows[i][5] || 'N/C';
+      const rawName = ninjaRows[i][1];
+      if (rawName && rawName.trim() !== "") {
+        const cleanName = rawName.trim();
+        const key = cleanName.toUpperCase(); // Clé de comparaison unique
+        ninjaMap.set(key, {
+            name: cleanName,
+            lastContact: ninjaRows[i][5] || 'N/C'
+        });
+      }
     }
 
     // 3. Mapping Cortex (Nom en B [index 1], Last Seen en F [index 5])
     for (let i = 1; i < cortexRows.length; i++) {
-      const name = cortexRows[i][1];
-      if (name) cortexMap[name] = cortexRows[i][5] || 'N/C';
+      const rawName = cortexRows[i][1];
+      if (rawName && rawName.trim() !== "") {
+        const cleanName = rawName.trim();
+        const key = cleanName.toUpperCase(); // Clé de comparaison unique
+        cortexMap.set(key, {
+            name: cleanName,
+            lastSeen: cortexRows[i][5] || 'N/C'
+        });
+      }
     }
 
     // 4. Construction du tableau de comparaison
-    const allDevices = new Set([...Object.keys(ninjaMap), ...Object.keys(cortexMap)]);
+    // On fusionne toutes les clés uniques des deux maps
+    const allKeys = new Set([...ninjaMap.keys(), ...cortexMap.keys()]);
     
-    // Le premier élément du tableau est le Header
     const compareRows = [
       ['Nom device', 'Dans Ninja?', 'Last Contact (Ninja)', 'Dans Cortex?', 'Last Seen (Cortex)']
     ];
 
-    for (const name of Array.from(allDevices).sort()) {
+    // Trier les clés par ordre alphabétique
+    const sortedKeys = Array.from(allKeys).sort();
+
+    for (const key of sortedKeys) {
+      const nData = ninjaMap.get(key);
+      const cData = cortexMap.get(key);
+
       compareRows.push([
-        name,
-        ninjaMap[name] ? 'Oui' : 'Non',
-        ninjaMap[name] || '',
-        cortexMap[name] ? 'Oui' : 'Non',
-        cortexMap[name] || ''
+        nData?.name || cData?.name || key, // Priorité au nom formatté de Ninja, sinon Cortex
+        nData ? 'OUI' : 'NON',
+        nData ? nData.lastContact : '',
+        cData ? 'OUI' : 'NON',
+        cData ? cData.lastSeen : ''
       ]);
     }
 
@@ -100,8 +121,8 @@ async function buildCompareSheet() {
       range: SHEET_NAME_COMPARE
     });
 
-    // 6. Écriture groupée (BatchUpdate) pour plus d'efficacité
-    const lastUpdate = `Mis à jour le : ${new Date().toLocaleString('fr-FR')}`;
+    // 6. Écriture groupée (BatchUpdate)
+    const lastUpdate = `Dernière synchronisation : ${new Date().toLocaleString('fr-FR')}`;
 
     log("📝 Écriture des nouvelles données...");
     await sheets.spreadsheets.values.batchUpdate({
@@ -111,27 +132,27 @@ async function buildCompareSheet() {
         data: [
           {
             range: `${SHEET_NAME_COMPARE}!A1`,
-            values: [[lastUpdate]] // Date en A1
+            values: [[lastUpdate]] // Info de date en A1
           },
           {
             range: `${SHEET_NAME_COMPARE}!A2`,
-            values: compareRows // Header en A2 + Données en dessous
+            values: compareRows // En-têtes en A2 et données en dessous
           }
         ]
       }
     });
 
-    log(`✅ Succès : ${compareRows.length - 1} devices synchronisés.`);
+    log(`✅ Succès : ${compareRows.length - 1} devices traités.`);
 
   } catch (err) {
     log(`❌ Erreur fatale : ${err.message}`);
-    if (err.response) console.error(err.response.data);
+    if (err.response) console.error(JSON.stringify(err.response.data, null, 2));
   }
 }
 
 // ----------------- EXÉCUTION -----------------
 (async function main() {
-  log(`🚀 Démarrage du script`);
+  log(`🚀 Démarrage du script de comparaison`);
   await buildCompareSheet();
   log(`🏁 Fin du script`);
 })();
