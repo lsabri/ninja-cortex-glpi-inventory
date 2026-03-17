@@ -14,7 +14,7 @@ const NINJA_URL = process.env.NINJA_URL;
 const CLIENT_ID_NINJA = process.env.CLIENT_ID_NINJA;
 const AUTH_SECRET_NINJA = process.env.AUTH_SECRET_NINJA;
 
-const AUTH_ID_CORTEX = process.env.AUTH_ID;
+const AUTH_ID_CORTEX = process.env.AUTH_ID_CORTEX;
 const AUTH_TOKEN_CORTEX = process.env.AUTH_TOKEN_CORTEX;
 const URL_CORTEX = process.env.URL_CORTEX;
 
@@ -320,10 +320,10 @@ async function buildCompareSheet() {
 // ----------------- MAIN -----------------
 async function main() {
   log(`🚀 DÉMARRAGE INVENTAIRE GLOBAL`);
-  await getNinjaDevices();
+  //await getNinjaDevices();
   await getCortexDevices();
-  await getGlpiDevices();
-  await buildCompareSheet();
+  //await getGlpiDevices();
+  //await buildCompareSheet();
   log(`🏁 FIN EXÉCUTION`);
 }
 

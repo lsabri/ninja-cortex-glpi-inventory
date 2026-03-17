@@ -1,0 +1,118 @@
+const axios = require('axios');
+const https = require('https');
+const { google } = require('googleapis');
+const dotenv = require('dotenv');
+const path = require('path');
+const os = require('os');
+
+dotenv.config();
+
+// ----------------- CONFIG -----------------
+const GLPI_URL = process.env.GLPI_URL;
+const APP_TOKEN = process.env.GLPI_APP_TOKEN;
+const USER_TOKEN = process.env.GLPI_USER_TOKEN;
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME_SERVICES = "Services";
+const CREDENTIALS_PATH_ENV = process.env.CREDENTIALS_PATH;
+
+let CREDENTIALS_PATH = CREDENTIALS_PATH_ENV.startsWith('~') 
+  ? path.join(os.homedir(), CREDENTIALS_PATH_ENV.slice(1)) 
+  : CREDENTIALS_PATH_ENV;
+
+const agentGLPI = new https.Agent({ rejectUnauthorized: false });
+const ITEMTYPE_SERVICE = 'PluginFieldsServicefielddropdown';
+
+// ----------------- GOOGLE SHEETS -----------------
+async function writeServicesToSheet(services) {
+    try {
+        const auth = new google.auth.GoogleAuth({
+            keyFile: CREDENTIALS_PATH,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        // On crée un dictionnaire des noms pour retrouver le parent par son ID
+        const serviceLookup = {};
+        services.forEach(s => {
+            serviceLookup[s.id] = s.completename || s.name;
+        });
+
+        // Préparation des lignes : ID (C), Nom (D), Parent (E), Chemin Complet (F)
+        const values = [
+            ["ID Service", "Nom Unique", "Service Parent", "Arborescence Complète"], // Headers
+            ...services.map(s => {
+                // On cherche l'ID du parent (nom de champ dynamique basé sur le plugin fields)
+                const parentId = s.plugin_fields_servicefielddropdowns_id || s.id_parent || 0;
+                const parentName = (parentId && serviceLookup[parentId]) ? serviceLookup[parentId] : "Aucun";
+                
+                return [
+                    s.id, 
+                    s.name, 
+                    parentName, 
+                    s.completename || s.name
+                ];
+            })
+        ];
+
+        // Nettoyage de C à F
+        await sheets.spreadsheets.values.clear({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${SHEET_NAME_SERVICES}!C1:F`, 
+        });
+
+        // Écriture à partir de C1
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${SHEET_NAME_SERVICES}!C1`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: { values },
+        });
+
+        console.log(`✅ ${services.length} services (2 niveaux) écrits dans ${SHEET_NAME_SERVICES}`);
+    } catch (err) {
+        console.error(`❌ Erreur Google Sheets : ${err.message}`);
+    }
+}
+
+// ----------------- GLPI -----------------
+async function getGlpiSession() {
+    const res = await axios.get(`${GLPI_URL}/initSession`, {
+        headers: { 'App-Token': APP_TOKEN, 'Authorization': `user_token ${USER_TOKEN}` },
+        httpsAgent: agentGLPI
+    });
+    return res.data.session_token;
+}
+
+async function runExport() {
+    let token;
+    try {
+        token = await getGlpiSession();
+        console.log("🔓 Session GLPI OK.");
+
+        // On récupère les données
+        const response = await axios.get(`${GLPI_URL}/${ITEMTYPE_SERVICE}`, {
+            params: { 'range': '0-1000' }, // Augmenté pour être sûr d'avoir toute l'arborescence
+            headers: { 'App-Token': APP_TOKEN, 'Session-Token': token },
+            httpsAgent: agentGLPI
+        });
+
+        if (Array.isArray(response.data)) {
+            await writeServicesToSheet(response.data);
+        } else {
+            console.log("⚠️ Aucun service trouvé.");
+        }
+
+    } catch (err) {
+        console.error(`❌ Erreur : ${err.message}`);
+    } finally {
+        if (token) {
+            await axios.get(`${GLPI_URL}/killSession`, { 
+                headers: { 'App-Token': APP_TOKEN, 'Session-Token': token },
+                httpsAgent: agentGLPI 
+            }).catch(() => {});
+        }
+    }
+}
+
+runExport();
